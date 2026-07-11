@@ -1,4 +1,6 @@
+// Esta clase representa un usuario de la aplicación con sus propiedades y métodos asociados.
 class AppUser {
+
   final int id;
   final String username;
   final String token;
@@ -6,6 +8,7 @@ class AppUser {
   final int? hotelId;
   final int? chainId;
 
+  // Constructor de la clase AppUser que inicializa todas las propiedades requeridas y opcionales.
   const AppUser({
     required this.id,
     required this.username,
@@ -14,6 +17,8 @@ class AppUser {
     this.hotelId,
     this.chainId,
   });
+
+
 
   factory AppUser.fromJson(Map<String, dynamic> json) {
     return AppUser(

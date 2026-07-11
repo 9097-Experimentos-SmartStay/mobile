@@ -23,6 +23,11 @@ Endpoints vigentes detectados:
 - GET/POST `/bookings`
 - GET/POST `/payments`
 - GET `/analytics/performance/monthly`
+- POST `/api/v1/io-t-emulator/rooms/{roomId}/inject-telemetry`
+-- POST `/api/v1/io-t-emulator/rooms/{roomId}/thermostat`
+- GET `/api/v1/io-t-emulator/rooms/{roomId}/actuators-state`
+
+
 
 ## Cambio importante detectado
 
