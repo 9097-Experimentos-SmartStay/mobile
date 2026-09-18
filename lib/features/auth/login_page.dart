@@ -13,35 +13,73 @@ class LoginPage extends StatefulWidget {
 
 class _LoginPageState extends State<LoginPage> {
   final ApiClient _api = ApiClient();
-  final TextEditingController _username = TextEditingController();
+  final TextEditingController _email = TextEditingController();
   final TextEditingController _password = TextEditingController();
   bool _obscure = true;
   bool _loading = false;
 
   @override
   void dispose() {
-    _username.dispose();
+    _email.dispose();
     _password.dispose();
     super.dispose();
   }
 
   Future<void> _login() async {
-    if (_username.text.trim().length < 3 || _password.text.length < 6) {
-      showSmartSnack(context, 'Ingresa usuario y contraseña válidos.');
+    final email = _email.text.trim();
+    if (!email.contains('@') || _password.text.isEmpty) {
+      showSmartSnack(context, 'Ingresa tu correo y contraseña.');
       return;
     }
 
     setState(() => _loading = true);
     try {
-      await _api.signIn(_username.text.trim(), _password.text);
+      await _api.signIn(email, _password.text);
       if (!mounted) return;
       Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const ClientShell()));
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      if (e.emailNotVerified) {
+        _offerResend(email, e.message);
+      } else {
+        showSmartSnack(context, e.message);
+      }
     } catch (e) {
       if (!mounted) return;
       showSmartSnack(context, 'No se pudo iniciar sesión: $e');
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+  }
+
+  void _offerResend(String email, String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        duration: const Duration(seconds: 8),
+        action: SnackBarAction(
+          label: 'Reenviar',
+          onPressed: () async {
+            try {
+              final result = await _api.resendVerificationEmail(email);
+              if (!mounted) return;
+              showSmartSnack(context, result);
+            } catch (e) {
+              if (!mounted) return;
+              showSmartSnack(context, 'No se pudo reenviar el correo: $e');
+            }
+          },
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openRegister() async {
+    final email = await Navigator.push<String>(
+      context,
+      MaterialPageRoute(builder: (_) => const RegisterPage()),
+    );
+    if (email != null && mounted) _email.text = email;
   }
 
   @override
@@ -126,9 +164,10 @@ class _LoginPageState extends State<LoginPage> {
                             const Text('Inicia sesión solo cuando quieras reservar o ver tus datos.', style: TextStyle(color: kMuted)),
                             const SizedBox(height: 22),
                             TextField(
-                              controller: _username,
+                              controller: _email,
+                              keyboardType: TextInputType.emailAddress,
                               textInputAction: TextInputAction.next,
-                              decoration: const InputDecoration(labelText: 'Usuario o correo', prefixIcon: Icon(Icons.mail_outline)),
+                              decoration: const InputDecoration(labelText: 'Correo', prefixIcon: Icon(Icons.mail_outline)),
                             ),
                             const SizedBox(height: 14),
                             TextField(
@@ -149,11 +188,7 @@ class _LoginPageState extends State<LoginPage> {
                             const SizedBox(height: 12),
                             Center(
                               child: TextButton(
-                                onPressed: _loading
-                                    ? null
-                                    : () {
-                                        Navigator.push(context, MaterialPageRoute(builder: (_) => const RegisterPage()));
-                                      },
+                                onPressed: _loading ? null : _openRegister,
                                 child: const Text('Crear una cuenta nueva'),
                               ),
                             ),

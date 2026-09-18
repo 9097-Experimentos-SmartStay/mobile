@@ -1,4 +1,4 @@
-// Esta clase representa un usuario de la aplicación con sus propiedades y métodos asociados.
+
 class AppUser {
 
   final int id;
@@ -8,7 +8,6 @@ class AppUser {
   final int? hotelId;
   final int? chainId;
 
-  // Constructor de la clase AppUser que inicializa todas las propiedades requeridas y opcionales.
   const AppUser({
     required this.id,
     required this.username,
@@ -28,6 +27,35 @@ class AppUser {
       role: readString(json, 'role', fallback: 'guest'),
       hotelId: readNullableInt(json, 'hotelId'),
       chainId: readNullableInt(json, 'chainId'),
+    );
+  }
+}
+
+/// Answer of `POST /authentication/sign-up`: the account exists but has no token yet,
+/// the e-mail still has to be verified from the link the backend sent.
+class SignUpResult {
+  final int id;
+  final String email;
+  final bool emailVerified;
+  final String message;
+
+  const SignUpResult({
+    required this.id,
+    required this.email,
+    required this.emailVerified,
+    required this.message,
+  });
+
+  factory SignUpResult.fromJson(Map<String, dynamic> json) {
+    return SignUpResult(
+      id: readInt(json, 'id'),
+      email: readString(json, 'email'),
+      emailVerified: json['emailVerified'] == true,
+      message: readString(
+        json,
+        'message',
+        fallback: 'Cuenta creada. Revisa tu correo para verificarla.',
+      ),
     );
   }
 }

@@ -3,10 +3,26 @@ import 'package:http/http.dart' as http;
 import '../domain/models.dart';
 import 'session.dart';
 
+/// Error returned by the SmartStay API, already reduced to a message the UI can show.
+class ApiException implements Exception {
+  final int statusCode;
+  final String message;
+
+  /// Machine-readable code of the backend ProblemDetails, e.g. `auth.email_not_verified`.
+  final String code;
+
+  const ApiException(this.statusCode, this.message, {this.code = ''});
+
+  bool get emailNotVerified => code == 'auth.email_not_verified';
+
+  @override
+  String toString() => message;
+}
+
 class ApiClient {
-  static const String baseUrl = String.fromEnvironment(
+  static const String _rawBaseUrl = String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: 'https://application-mobile-backend.onrender.com/api/v1',
+    defaultValue: 'https://smartstay-movildev-api.onrender.com/api/v1',
   );
 
   final http.Client _client;
@@ -25,6 +41,12 @@ class ApiClient {
     return headers;
   }
 
+  /// Tolerates an `API_BASE_URL` given with or without a trailing slash.
+  static String get baseUrl {
+    final trimmed = _rawBaseUrl.trim();
+    return trimmed.endsWith('/') ? trimmed.substring(0, trimmed.length - 1) : trimmed;
+  }
+
   Uri _uri(String path) => Uri.parse('$baseUrl$path');
 
   Future<dynamic> _decode(http.Response response) async {
@@ -33,40 +55,89 @@ class ApiClient {
       if (body.isEmpty) return null;
       return jsonDecode(body);
     }
+    throw _problem(response.statusCode, body);
+  }
 
-    String message = body;
+  /// Reads an RFC 7807 ProblemDetails: `detail` carries the message and `errors`
+  /// lists one entry per invalid field on a 400.
+  ApiException _problem(int statusCode, String body) {
     try {
       final parsed = jsonDecode(body);
       if (parsed is Map) {
-        message = parsed['message']?.toString() ?? parsed['title']?.toString() ?? body;
+        final errors = parsed['errors'];
+        if (errors is Map && errors.isNotEmpty) {
+          final messages = errors.values
+              .expand((value) => value is List ? value : [value])
+              .map((value) => value.toString())
+              .where((value) => value.isNotEmpty);
+          if (messages.isNotEmpty) {
+            return ApiException(
+              statusCode,
+              messages.join('\n'),
+              code: parsed['code']?.toString() ?? '',
+            );
+          }
+        }
+
+        final message = parsed['detail']?.toString() ??
+            parsed['message']?.toString() ??
+            parsed['title']?.toString();
+        if (message != null && message.isNotEmpty) {
+          return ApiException(statusCode, message, code: parsed['code']?.toString() ?? '');
+        }
       }
     } catch (_) {}
 
-    throw Exception('HTTP ${response.statusCode}: $message');
+    return ApiException(statusCode, body.isEmpty ? 'Error HTTP $statusCode' : body);
   }
 
-  Future<AppUser> signIn(String username, String password) async {
+  Future<AppUser> signIn(String email, String password) async {
     final response = await _client.post(
       _uri('/authentication/sign-in'),
       headers: _headers(auth: false),
-      body: jsonEncode({'username': username, 'password': password}),
+      body: jsonEncode({'email': email, 'password': password}),
     );
     final data = await _decode(response) as Map<String, dynamic>;
     final user = AppUser.fromJson(data);
+    if (user.token.isEmpty) {
+      throw const ApiException(200, 'Esta cuenta requiere verificación en dos pasos, que aún no está disponible en la app.');
+    }
     await SessionStore.save(user);
     return user;
   }
 
-  Future<AppUser> signUp(String username, String password) async {
+  /// Creates a guest account. The backend answers 201 without a token and mails a
+  /// verification link: the user can only sign in after opening it.
+  Future<SignUpResult> signUp({
+    required String firstName,
+    required String lastName,
+    required String email,
+    required String password,
+  }) async {
     final response = await _client.post(
       _uri('/authentication/sign-up'),
       headers: _headers(auth: false),
-      body: jsonEncode({'username': username, 'password': password, 'role': 'guest'}),
+      body: jsonEncode({
+        'firstName': firstName,
+        'lastName': lastName,
+        'email': email,
+        'password': password,
+        'role': 'guest',
+      }),
     );
     final data = await _decode(response) as Map<String, dynamic>;
-    final user = AppUser.fromJson(data);
-    await SessionStore.save(user);
-    return user;
+    return SignUpResult.fromJson(data);
+  }
+
+  Future<String> resendVerificationEmail(String email) async {
+    final response = await _client.post(
+      _uri('/authentication/verify-email/resend'),
+      headers: _headers(auth: false),
+      body: jsonEncode({'email': email}),
+    );
+    final data = await _decode(response);
+    if (data is Map && data['message'] != null) return data['message'].toString();
+    return 'Te enviamos un nuevo enlace de verificación.';
   }
 
   /// Loads hotels from the backend whenever the endpoint is public.
@@ -130,7 +201,7 @@ class ApiClient {
 
     final local = await SessionStore.readLocalBookings();
     try {
-      final response = await _client.get(_uri('/bookings/me'), headers: _headers());
+      final response = await _client.get(_uri('/bookings'), headers: _headers());
       final data = await _decode(response);
       if (data is List) {
         final remote = data.map((e) => Booking.fromJson(Map<String, dynamic>.from(e as Map))).toList();
@@ -197,7 +268,7 @@ class ApiClient {
 
     try {
       final response = await _client.post(
-        _uri('/bookings/$bookingId/cancel-by-guest'),
+        _uri('/bookings/$bookingId/cancel'),
         headers: _headers(),
       );
       final data = await _decode(response) as Map<String, dynamic>;
@@ -256,7 +327,7 @@ class ApiClient {
     }
 
     final response = await _client.post(
-      _uri('/profiles'),
+      _uri('/guests'),
       headers: _headers(),
       body: jsonEncode({
         'firstName': firstName,
