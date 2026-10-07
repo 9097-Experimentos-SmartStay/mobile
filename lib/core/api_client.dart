@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../domain/models.dart';
+import '../domain/staff_models.dart';
 import 'session.dart';
 
 /// Error returned by the SmartStay API, already reduced to a message the UI can show.
@@ -91,19 +92,67 @@ class ApiClient {
     return ApiException(statusCode, body.isEmpty ? 'Error HTTP $statusCode' : body);
   }
 
-  Future<AppUser> signIn(String email, String password) async {
+  /// Signs in. Returns the [AppUser] already saved in the session, or an [MfaChallenge]
+  /// when the account (staff) still needs the authenticator code.
+  Future<Object> signIn(String email, String password) async {
     final response = await _client.post(
       _uri('/authentication/sign-in'),
       headers: _headers(auth: false),
       body: jsonEncode({'email': email, 'password': password}),
     );
     final data = await _decode(response) as Map<String, dynamic>;
+    final challenge = MfaChallenge.fromJson(data);
+    if (challenge != null) return challenge;
+    return _completeSignIn(data);
+  }
+
+  Future<AppUser> _completeSignIn(Map<String, dynamic> data) async {
     final user = AppUser.fromJson(data);
     if (user.token.isEmpty) {
-      throw const ApiException(200, 'Esta cuenta requiere verificación en dos pasos, que aún no está disponible en la app.');
+      throw const ApiException(200, 'El servidor no devolvió una sesión válida. Intenta de nuevo.');
     }
     await SessionStore.save(user);
     return user;
+  }
+
+  /// Headers for the `/mfa/*` endpoints, which take the short-lived mfaToken instead of a session.
+  Map<String, String> _mfaHeaders(String mfaToken) =>
+      {..._headers(auth: false), 'Authorization': 'Bearer $mfaToken'};
+
+  /// Second step of the sign-in: a 6-digit authenticator code or a one-time recovery code.
+  Future<AppUser> verifyMfa(String mfaToken, {String? code, String? recoveryCode}) async {
+    final response = await _client.post(
+      _uri('/authentication/mfa/verify'),
+      headers: _mfaHeaders(mfaToken),
+      body: jsonEncode({
+        if (code != null) 'code': code,
+        if (recoveryCode != null) 'recoveryCode': recoveryCode,
+      }),
+    );
+    return _completeSignIn(await _decode(response) as Map<String, dynamic>);
+  }
+
+  /// Starts enrolling an authenticator app; calling it again issues a new secret.
+  Future<MfaEnrollment> startMfaEnrollment(String mfaToken) async {
+    final response = await _client.post(
+      _uri('/authentication/mfa/enrollment'),
+      headers: _mfaHeaders(mfaToken),
+    );
+    return MfaEnrollment.fromJson(await _decode(response) as Map<String, dynamic>);
+  }
+
+  /// Confirms the enrollment with a first code: enables MFA, signs in and returns
+  /// the recovery codes, which the backend shows only this once.
+  Future<List<String>> confirmMfaEnrollment(String mfaToken, String code) async {
+    final response = await _client.post(
+      _uri('/authentication/mfa/enrollment/confirm'),
+      headers: _mfaHeaders(mfaToken),
+      body: jsonEncode({'code': code}),
+    );
+    final data = await _decode(response) as Map<String, dynamic>;
+    await _completeSignIn(data);
+    final codes = data['recoveryCodes'];
+    return codes is List ? codes.map((c) => c.toString()).toList() : const [];
   }
 
   /// Creates a guest account. The backend answers 201 without a token and mails a
@@ -196,120 +245,33 @@ class ApiClient {
     return rooms.where((room) => room.hotelId == hotelId).toList();
   }
 
-  Future<List<Booking>> getMyBookings() async {
-    if (!_hasSession) return const [];
-
-    final local = await SessionStore.readLocalBookings();
-    try {
-      final response = await _client.get(_uri('/bookings'), headers: _headers());
-      final data = await _decode(response);
-      if (data is List) {
-        final remote = data.map((e) => Booking.fromJson(Map<String, dynamic>.from(e as Map))).toList();
-        if (remote.isEmpty) return local;
-
-        final remoteIds = remote.map((item) => item.id).toSet();
-        final mergedLocal = local.where((item) => !remoteIds.contains(item.id));
-        return [...remote, ...mergedLocal];
-      }
-    } catch (_) {
-      return local;
-    }
-    return local;
-  }
-
-  Future<Booking> createBooking({
+  /// The guest books a room for themselves: name and e-mail come from their account
+  /// (`guestName` may override the name). Starts Pending with a 24 h payment deadline.
+  Future<HotelBooking> createBooking({
     required int roomId,
-    required String guestName,
-    required String guestEmail,
-    required String checkInDate,
-    required String checkOutDate,
+    required DateTime checkIn,
+    required DateTime checkOut,
+    String guestName = '',
   }) async {
-    if (!_hasSession) {
-      throw Exception('Inicia sesión para completar la reserva.');
-    }
-
-    final payload = {
+    return HotelBooking.fromJson(await _send('POST', '/bookings', {
       'roomId': roomId,
-      'guestName': guestName,
-      'guestEmail': guestEmail,
-      'checkInDate': checkInDate,
-      'checkOutDate': checkOutDate,
-    };
-
-    try {
-      final response = await _client.post(
-        _uri('/bookings'),
-        headers: _headers(),
-        body: jsonEncode(payload),
-      );
-      final data = await _decode(response) as Map<String, dynamic>;
-      final booking = Booking.fromJson(data);
-      await SessionStore.saveLocalBooking(booking);
-      return booking;
-    } catch (_) {
-      final fallback = Booking(
-        id: DateTime.now().millisecondsSinceEpoch.remainder(1000000),
-        roomId: roomId,
-        guestName: guestName,
-        guestEmail: guestEmail,
-        checkInDate: checkInDate,
-        checkOutDate: checkOutDate,
-        status: 'Pending',
-      );
-      await SessionStore.saveLocalBooking(fallback);
-      return fallback;
-    }
+      'checkInDate': formatApiDate(checkIn),
+      'checkOutDate': formatApiDate(checkOut),
+      if (guestName.isNotEmpty) 'guestName': guestName,
+    }));
   }
 
-  Future<Booking> cancelMyBooking(int bookingId) async {
-    if (!_hasSession) {
-      throw Exception('Inicia sesión para cancelar reservas.');
-    }
-
-    try {
-      final response = await _client.post(
-        _uri('/bookings/$bookingId/cancel'),
-        headers: _headers(),
-      );
-      final data = await _decode(response) as Map<String, dynamic>;
-      final booking = Booking.fromJson(data);
-      await SessionStore.saveLocalBooking(booking);
-      return booking;
-    } catch (_) {
-      await SessionStore.updateLocalBookingStatus(bookingId, 'Cancelled');
-      final bookings = await SessionStore.readLocalBookings();
-      return bookings.firstWhere((item) => item.id == bookingId);
-    }
-  }
-
-  Future<Payment> processPayment({
-    required int bookingId,
-    required double amount,
-    required String paymentMethod,
-    required String cardNumber,
-    required String cardHolderName,
-    required String expirationDate,
-    required String cvv,
-  }) async {
-    if (!_hasSession) {
-      throw Exception('Inicia sesión para procesar pagos.');
-    }
-
-    final response = await _client.post(
-      _uri('/payments'),
-      headers: _headers(),
-      body: jsonEncode({
-        'bookingId': bookingId,
-        'amount': amount,
-        'paymentMethod': paymentMethod,
-        'cardNumber': cardNumber,
-        'cardHolderName': cardHolderName,
-        'expirationDate': expirationDate,
-        'cvv': cvv,
-      }),
-    );
-    final data = await _decode(response) as Map<String, dynamic>;
-    return Payment.fromJson(data);
+  /// POST /bookings/{id}/payments/card: guests only, own Pending booking; the amount is the booking
+  /// total. The gateway is simulated and the card is never stored. A declined card answers 409
+  /// `payment.card_declined` and the guest can retry.
+  Future<void> payWithCard(int bookingId, CardDetails card) async {
+    await _send('POST', '/bookings/$bookingId/payments/card', {
+      'cardNumber': card.number,
+      'cardHolderName': card.holderName,
+      'expiryMonth': card.expiryMonth,
+      'expiryYear': card.expiryYear,
+      'cvv': card.cvv,
+    });
   }
 
   Future<void> createProfile({
@@ -363,6 +325,119 @@ class ApiClient {
     final token = SessionStore.currentUser?.token;
     return token != null && token.isNotEmpty;
   }
+
+  // --- Bookings, payments and hotel operations. Failures are never replaced by local or preview data:
+  // the caller shows the backend's message.
+
+  Uri _query(String path, Map<String, Object?> params) => _uri(path).replace(queryParameters: {
+        for (final entry in params.entries)
+          if (entry.value != null) entry.key: entry.value.toString(),
+      });
+
+  Future<dynamic> _get(Uri uri) async => _decode(await _client.get(uri, headers: _headers()));
+
+  Future<Map<String, dynamic>> _send(String method, String path, [Map<String, Object?>? body]) async {
+    final request = http.Request(method, _uri(path))
+      ..headers.addAll(_headers())
+      ..body = body == null ? '' : jsonEncode(body);
+    final response = await http.Response.fromStream(await _client.send(request));
+    final data = await _decode(response);
+    return data is Map ? Map<String, dynamic>.from(data) : <String, dynamic>{};
+  }
+
+  List<Map<String, dynamic>> _list(dynamic data) =>
+      data is List ? data.map((e) => Map<String, dynamic>.from(e as Map)).toList() : const [];
+
+  /// GET /bookings, scoped by the backend: a guest gets their own bookings, staff those of their
+  /// hotel (every booking for a chain_admin). Newest first.
+  Future<List<HotelBooking>> getBookings() async =>
+      _list(await _get(_uri('/bookings'))).map(HotelBooking.fromJson).toList();
+
+  Future<HotelBooking> getBooking(int id) async =>
+      HotelBooking.fromJson(Map<String, dynamic>.from(await _get(_uri('/bookings/$id')) as Map));
+
+  /// GET /bookings/calendar: [from] included, [to] excluded, at most 92 days.
+  Future<BookingCalendar> getBookingCalendar(DateTime from, DateTime to, {int? hotelId}) async {
+    final data = await _get(_query('/bookings/calendar', {
+      'from': formatApiDate(from),
+      'to': formatApiDate(to),
+      'hotelId': hotelId,
+    }));
+    return BookingCalendar.fromJson(Map<String, dynamic>.from(data as Map));
+  }
+
+  /// GET /rooms/available: rooms free for the whole stay, with the total of the booking.
+  Future<List<AvailableRoom>> getAvailableRooms(DateTime checkIn, DateTime checkOut, {int? hotelId}) async {
+    final data = await _get(_query('/rooms/available', {
+      'checkIn': formatApiDate(checkIn),
+      'checkOut': formatApiDate(checkOut),
+      'hotelId': hotelId,
+    }));
+    return _list(data).map(AvailableRoom.fromJson).toList();
+  }
+
+  /// Desk booking for a guest without an account (phone or walk-in). Starts Pending.
+  Future<HotelBooking> createDeskBooking({
+    required int roomId,
+    required DateTime checkIn,
+    required DateTime checkOut,
+    required String guestName,
+    required String guestEmail,
+    String guestPhone = '',
+  }) async {
+    return HotelBooking.fromJson(await _send('POST', '/bookings', {
+      'roomId': roomId,
+      'checkInDate': formatApiDate(checkIn),
+      'checkOutDate': formatApiDate(checkOut),
+      'guestName': guestName,
+      'guestEmail': guestEmail,
+      if (guestPhone.isNotEmpty) 'guestPhone': guestPhone,
+    }));
+  }
+
+  /// PATCH /bookings/{id}: new dates and/or another room of the same hotel.
+  Future<HotelBooking> changeBooking(int id, {DateTime? checkIn, DateTime? checkOut, int? roomId}) async {
+    return HotelBooking.fromJson(await _send('PATCH', '/bookings/$id', {
+      if (checkIn != null) 'checkInDate': formatApiDate(checkIn),
+      if (checkOut != null) 'checkOutDate': formatApiDate(checkOut),
+      if (roomId != null) 'roomId': roomId,
+    }));
+  }
+
+  Future<HotelBooking> cancelBooking(int id) async =>
+      HotelBooking.fromJson(await _send('POST', '/bookings/$id/cancel'));
+
+  /// POST /bookings/{id}/payments: the amount is always the booking total; it becomes Confirmed.
+  Future<StaffPayment> registerPayment(int bookingId, {required String method, String operationNumber = '', String note = ''}) async {
+    return StaffPayment.fromJson(await _send('POST', '/bookings/$bookingId/payments', {
+      'method': method,
+      if (operationNumber.isNotEmpty) 'operationNumber': operationNumber,
+      if (note.isNotEmpty) 'note': note,
+    }));
+  }
+
+  /// GET /payments/booking/{id}: the completed (or refunded) payment of a booking.
+  Future<StaffPayment> getPaymentOfBooking(int bookingId) async =>
+      StaffPayment.fromJson(Map<String, dynamic>.from(await _get(_uri('/payments/booking/$bookingId')) as Map));
+
+  /// GET /rooms/map: staff of a hotel may omit [hotelId]; a chain_admin must send it.
+  Future<RoomMap> getRoomMap({int? hotelId}) async =>
+      RoomMap.fromJson(Map<String, dynamic>.from(await _get(_query('/rooms/map', {'hotelId': hotelId})) as Map));
+
+  /// PATCH /rooms/{id}/status: 409 when the transition is not allowed.
+  Future<void> changeRoomStatus(int roomId, String status) async {
+    await _send('PATCH', '/rooms/$roomId/status', {'status': status});
+  }
+
+  Future<List<RoomStatusChange>> getRoomStatusHistory(int roomId) async =>
+      _list(await _get(_uri('/rooms/$roomId/status-history'))).map(RoomStatusChange.fromJson).toList();
+
+  Future<List<GuestProfile>> getGuests() async =>
+      _list(await _get(_uri('/guests'))).map(GuestProfile.fromJson).toList();
+
+  /// Hotels without the guest preview fallback (chain_admin picks one for the room map).
+  Future<List<Hotel>> getStaffHotels() async =>
+      _list(await _get(_uri('/hotels'))).map(Hotel.fromJson).toList();
 
   static const List<Hotel> _previewHotels = [
     Hotel(

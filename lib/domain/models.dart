@@ -7,6 +7,8 @@ class AppUser {
   final String role;
   final int? hotelId;
   final int? chainId;
+  final String firstName;
+  final String email;
 
   const AppUser({
     required this.id,
@@ -15,9 +17,9 @@ class AppUser {
     required this.role,
     this.hotelId,
     this.chainId,
+    this.firstName = '',
+    this.email = '',
   });
-
-
 
   factory AppUser.fromJson(Map<String, dynamic> json) {
     return AppUser(
@@ -27,6 +29,51 @@ class AppUser {
       role: readString(json, 'role', fallback: 'guest'),
       hotelId: readNullableInt(json, 'hotelId'),
       chainId: readNullableInt(json, 'chainId'),
+      firstName: readString(json, 'firstName'),
+      email: readString(json, 'email', fallback: readString(json, 'username')),
+    );
+  }
+}
+
+/// Sign-in whose password was right but still needs a second factor (US-52): staff
+/// accounts must use an authenticator app. [mfaToken] only works on the `/mfa/*` endpoints.
+class MfaChallenge {
+  final String mfaToken;
+
+  /// True when the account has no authenticator yet and must enroll one first.
+  final bool enrollmentRequired;
+  final String email;
+
+  const MfaChallenge({required this.mfaToken, required this.enrollmentRequired, required this.email});
+
+  static MfaChallenge? fromJson(Map<String, dynamic> json) {
+    final mfaToken = readString(json, 'mfaToken');
+    final enrollment = json['mfaEnrollmentRequired'] == true;
+    if (mfaToken.isEmpty || !(enrollment || json['mfaRequired'] == true)) return null;
+    return MfaChallenge(mfaToken: mfaToken, enrollmentRequired: enrollment, email: readString(json, 'email'));
+  }
+}
+
+/// Answer of `POST /authentication/mfa/enrollment`: what the authenticator app needs.
+class MfaEnrollment {
+  final String secret;
+  final String otpAuthUri;
+  final String issuer;
+  final String accountName;
+
+  const MfaEnrollment({
+    required this.secret,
+    required this.otpAuthUri,
+    required this.issuer,
+    required this.accountName,
+  });
+
+  factory MfaEnrollment.fromJson(Map<String, dynamic> json) {
+    return MfaEnrollment(
+      secret: readString(json, 'secret'),
+      otpAuthUri: readString(json, 'otpAuthUri'),
+      issuer: readString(json, 'issuer', fallback: 'SmartStay'),
+      accountName: readString(json, 'accountName'),
     );
   }
 }
@@ -139,92 +186,6 @@ class Room {
   bool get isAvailable {
     final normalized = status.toLowerCase();
     return normalized == 'clean' || normalized == 'available' || normalized == 'disponible';
-  }
-}
-
-class Booking {
-  final int id;
-  final int roomId;
-  final String guestName;
-  final String guestEmail;
-  final String checkInDate;
-  final String checkOutDate;
-  final String status;
-
-  const Booking({
-    required this.id,
-    required this.roomId,
-    required this.guestName,
-    required this.guestEmail,
-    required this.checkInDate,
-    required this.checkOutDate,
-    required this.status,
-  });
-
-  factory Booking.fromJson(Map<String, dynamic> json) {
-    return Booking(
-      id: readInt(json, 'id'),
-      roomId: readInt(json, 'roomId'),
-      guestName: readString(json, 'guestName'),
-      guestEmail: readString(json, 'guestEmail'),
-      checkInDate: readString(json, 'checkInDate'),
-      checkOutDate: readString(json, 'checkOutDate'),
-      status: readString(json, 'status', fallback: 'Pending'),
-    );
-  }
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'roomId': roomId,
-        'guestName': guestName,
-        'guestEmail': guestEmail,
-        'checkInDate': checkInDate,
-        'checkOutDate': checkOutDate,
-        'status': status,
-      };
-
-  Booking copyWith({String? status}) {
-    return Booking(
-      id: id,
-      roomId: roomId,
-      guestName: guestName,
-      guestEmail: guestEmail,
-      checkInDate: checkInDate,
-      checkOutDate: checkOutDate,
-      status: status ?? this.status,
-    );
-  }
-}
-
-class Payment {
-  final int id;
-  final int bookingId;
-  final String transactionId;
-  final double amount;
-  final String status;
-  final String cardNumberMasked;
-  final String paymentDate;
-
-  const Payment({
-    required this.id,
-    required this.bookingId,
-    required this.transactionId,
-    required this.amount,
-    required this.status,
-    required this.cardNumberMasked,
-    required this.paymentDate,
-  });
-
-  factory Payment.fromJson(Map<String, dynamic> json) {
-    return Payment(
-      id: readInt(json, 'id'),
-      bookingId: readInt(json, 'bookingId'),
-      transactionId: readString(json, 'transactionId'),
-      amount: readDouble(json, 'amount'),
-      status: readString(json, 'status'),
-      cardNumberMasked: readString(json, 'cardNumberMasked'),
-      paymentDate: readString(json, 'paymentDate'),
-    );
   }
 }
 

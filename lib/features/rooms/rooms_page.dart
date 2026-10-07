@@ -2,12 +2,15 @@ import 'package:flutter/material.dart';
 import '../../core/api_client.dart';
 import '../../core/session.dart';
 import '../../domain/models.dart';
+import '../../domain/staff_models.dart';
 import '../../shared/ui.dart';
 import '../auth/login_page.dart';
+import '../bookings/card_payment.dart';
+import '../staff/staff_ui.dart' show errorText;
 
 class RoomsPage extends StatefulWidget {
   final Hotel? selectedHotel;
-  final ValueChanged<Booking>? onBookingCreated;
+  final ValueChanged<HotelBooking>? onBookingCreated;
   final VoidCallback? onShowHotels;
 
   const RoomsPage({
@@ -57,7 +60,7 @@ class _RoomsPageState extends State<RoomsPage> {
       return;
     }
 
-    final booking = await showModalBottomSheet<Booking>(
+    final outcome = await showModalBottomSheet<_BookingOutcome>(
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
@@ -65,9 +68,23 @@ class _RoomsPageState extends State<RoomsPage> {
       builder: (_) => _BookingSheet(api: _api, room: room, hotel: hotel),
     );
 
-    if (booking == null || !mounted) return;
-    showSmartSnack(context, 'Reserva registrada.');
-    widget.onBookingCreated?.call(booking);
+    if (outcome == null || !mounted) return;
+    final code = outcome.booking.reference;
+    if (outcome.paymentError != null) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        duration: const Duration(seconds: 8),
+        content: Text('Reserva $code creada, pero el pago no se completó: ${outcome.paymentError} '
+            'Puedes pagarla desde Reservas antes de que venza.'),
+      ));
+    } else {
+      showSmartSnack(
+        context,
+        outcome.paid
+            ? 'Pago aprobado: la reserva $code quedó confirmada.'
+            : 'Reserva $code creada. Págala antes de 24 horas o se cancelará.',
+      );
+    }
+    widget.onBookingCreated?.call(outcome.booking);
   }
 
   void _showLoginRequired() {
@@ -328,7 +345,7 @@ class _BookingSheetState extends State<_BookingSheet> {
   late final TextEditingController _cardNumber;
   late final TextEditingController _expiration;
   late final TextEditingController _cvv;
-  late final TextEditingController _postalCode;
+  late final TextEditingController _cardHolder;
   late DateTime _checkInDate;
   late DateTime _checkOutDate;
   int _step = 0;
@@ -345,14 +362,17 @@ class _BookingSheetState extends State<_BookingSheet> {
     final now = DateTime.now();
     _checkInDate = DateTime(now.year, now.month, now.day).add(const Duration(days: 1));
     _checkOutDate = _checkInDate.add(const Duration(days: 2));
-    _guestName = TextEditingController(text: SessionStore.currentUser?.username.split('@').first ?? 'Cliente');
-    _guestEmail = TextEditingController(text: SessionStore.currentUser?.username ?? '');
+    final user = SessionStore.currentUser;
+    _guestName = TextEditingController(
+      text: user == null ? 'Cliente' : (user.firstName.isNotEmpty ? user.firstName : user.username.split('@').first),
+    );
+    _guestEmail = TextEditingController(text: user?.email ?? '');
     _checkIn = TextEditingController(text: _formatDate(_checkInDate));
     _checkOut = TextEditingController(text: _formatDate(_checkOutDate));
     _cardNumber = TextEditingController();
     _expiration = TextEditingController();
     _cvv = TextEditingController();
-    _postalCode = TextEditingController();
+    _cardHolder = TextEditingController();
   }
 
   @override
@@ -364,7 +384,7 @@ class _BookingSheetState extends State<_BookingSheet> {
     _cardNumber.dispose();
     _expiration.dispose();
     _cvv.dispose();
-    _postalCode.dispose();
+    _cardHolder.dispose();
     super.dispose();
   }
 
@@ -429,8 +449,8 @@ class _BookingSheetState extends State<_BookingSheet> {
 
   void _nextStep() {
     if (_step == 0) {
-      if (_guestName.text.trim().isEmpty || _guestEmail.text.trim().isEmpty) {
-        showSmartSnack(context, 'Completa nombre y correo.');
+      if (_guestName.text.trim().isEmpty) {
+        showSmartSnack(context, 'Ingresa el nombre del huésped.');
         return;
       }
       if (!_checkOutDate.isAfter(_checkInDate)) {
@@ -457,31 +477,45 @@ class _BookingSheetState extends State<_BookingSheet> {
     setState(() => _step--);
   }
 
-  bool _paymentLooksValid() {
-    final digits = _cardNumber.text.replaceAll(RegExp(r'\D'), '');
-    return digits.length >= 12 && _expiration.text.trim().isNotEmpty && _cvv.text.trim().length >= 3;
-  }
-
   Future<void> _createBooking() async {
-    if (_payNow && !_paymentLooksValid()) {
-      showSmartSnack(context, 'Completa los datos de la tarjeta para continuar.');
-      return;
+    // The card is checked before booking, so a typo does not leave a Pending booking behind.
+    CardDetails? card;
+    if (_payNow) {
+      final parsed = CardDetails.parse(
+        number: _cardNumber.text,
+        holderName: _cardHolder.text,
+        expiry: _expiration.text,
+        cvv: _cvv.text,
+      );
+      if (parsed.card == null) {
+        showSmartSnack(context, parsed.error!);
+        return;
+      }
+      card = parsed.card;
     }
 
     setState(() => _loading = true);
     try {
       final booking = await widget.api.createBooking(
         roomId: widget.room.id,
+        checkIn: _checkInDate,
+        checkOut: _checkOutDate,
         guestName: _guestName.text.trim(),
-        guestEmail: _guestEmail.text.trim(),
-        checkInDate: _checkIn.text.trim(),
-        checkOutDate: _checkOut.text.trim(),
       );
+      // The booking exists from here on: a declined card leaves it Pending, payable from Reservas.
+      String? paymentError;
+      if (card != null) {
+        try {
+          await widget.api.payWithCard(booking.id, card);
+        } catch (e) {
+          paymentError = errorText(e);
+        }
+      }
       if (!mounted) return;
-      Navigator.pop(context, booking);
+      Navigator.pop(context, _BookingOutcome(booking, paid: card != null && paymentError == null, paymentError: paymentError));
     } catch (e) {
       if (!mounted) return;
-      showSmartSnack(context, 'No se pudo completar la reserva.');
+      showSmartSnack(context, 'No se pudo completar la reserva: ${errorText(e)}');
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -570,7 +604,7 @@ class _BookingSheetState extends State<_BookingSheet> {
                             cardNumber: _cardNumber,
                             expiration: _expiration,
                             cvv: _cvv,
-                            postalCode: _postalCode,
+                            holder: _cardHolder,
                           ),
                       },
                     ),
@@ -591,6 +625,15 @@ class _BookingSheetState extends State<_BookingSheet> {
       ),
     );
   }
+}
+
+/// What the booking sheet did: the booking always exists; the card payment may have failed.
+class _BookingOutcome {
+  final HotelBooking booking;
+  final bool paid;
+  final String? paymentError;
+
+  const _BookingOutcome(this.booking, {required this.paid, this.paymentError});
 }
 
 class _ProgressDots extends StatelessWidget {
@@ -746,7 +789,16 @@ class _EditableGuestFields extends StatelessWidget {
         children: [
           TextField(controller: name, decoration: const InputDecoration(labelText: 'Nombre del huésped', prefixIcon: Icon(Icons.person_outline))),
           const SizedBox(height: 10),
-          TextField(controller: email, keyboardType: TextInputType.emailAddress, decoration: const InputDecoration(labelText: 'Correo', prefixIcon: Icon(Icons.mail_outline))),
+          // Guests always book with their account's e-mail: the backend ignores any other one.
+          TextField(
+            controller: email,
+            readOnly: true,
+            decoration: const InputDecoration(
+              labelText: 'Correo',
+              prefixIcon: Icon(Icons.mail_outline),
+              helperText: 'La reserva y el pago se envían al correo de tu cuenta.',
+            ),
+          ),
         ],
       ),
     );
@@ -862,14 +914,14 @@ class _CardDetailsStep extends StatelessWidget {
   final TextEditingController cardNumber;
   final TextEditingController expiration;
   final TextEditingController cvv;
-  final TextEditingController postalCode;
+  final TextEditingController holder;
 
   const _CardDetailsStep({
     super.key,
     required this.cardNumber,
     required this.expiration,
     required this.cvv,
-    required this.postalCode,
+    required this.holder,
   });
 
   @override
@@ -883,28 +935,12 @@ class _CardDetailsStep extends StatelessWidget {
         Container(
           padding: const EdgeInsets.all(18),
           decoration: BoxDecoration(border: Border.all(color: kSecondary, width: 1.3), borderRadius: BorderRadius.circular(22)),
-          child: Column(
-            children: [
-              TextField(
-                controller: cardNumber,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(labelText: 'Número de tarjeta', prefixIcon: Icon(Icons.credit_card), hintText: '•••• •••• •••• ••••'),
-              ),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  Expanded(child: TextField(controller: expiration, keyboardType: TextInputType.datetime, decoration: const InputDecoration(labelText: 'Vencimiento', hintText: 'MM/AA'))),
-                  const SizedBox(width: 12),
-                  Expanded(child: TextField(controller: cvv, obscureText: true, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Código CVV'))),
-                ],
-              ),
-            ],
-          ),
+          child: CardFields(number: cardNumber, holder: holder, expiry: expiration, cvv: cvv),
         ),
         const SizedBox(height: 14),
-        TextField(controller: postalCode, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Código postal')),
-        const SizedBox(height: 14),
         const _CountryBox(),
+        const SizedBox(height: 10),
+        const Text('Pago de prueba: no se mueve dinero ni se guarda la tarjeta.', style: TextStyle(color: kMuted, fontSize: 12)),
       ],
     );
   }

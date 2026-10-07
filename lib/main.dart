@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'core/session.dart';
 import 'features/client/client_shell.dart';
+import 'features/staff/staff_shell.dart';
 import 'shared/ui.dart';
 
 void main() {
@@ -79,7 +80,7 @@ class _StartupGateState extends State<StartupGate> {
         if (snapshot.connectionState != ConnectionState.done) {
           return const Scaffold(body: LoadingView(message: 'Preparando tu estadía...'));
         }
-        return const ClientShell();
+        return homeFor(const ClientShell());
       },
     );
   }

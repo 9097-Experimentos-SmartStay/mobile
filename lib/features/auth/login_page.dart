@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import '../../core/api_client.dart';
+import '../../domain/models.dart';
 import '../client/client_shell.dart';
 import '../../shared/ui.dart';
+import '../staff/staff_shell.dart';
+import 'mfa_page.dart';
 import 'register_page.dart';
 
 class LoginPage extends StatefulWidget {
@@ -34,9 +37,13 @@ class _LoginPageState extends State<LoginPage> {
 
     setState(() => _loading = true);
     try {
-      await _api.signIn(email, _password.text);
+      final result = await _api.signIn(email, _password.text);
       if (!mounted) return;
-      Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const ClientShell()));
+      if (result is MfaChallenge) {
+        Navigator.push(context, MaterialPageRoute(builder: (_) => MfaPage(challenge: result)));
+        return;
+      }
+      Navigator.pushAndRemoveUntil(context, MaterialPageRoute(builder: (_) => homeFor(const ClientShell())), (_) => false);
     } on ApiException catch (e) {
       if (!mounted) return;
       if (e.emailNotVerified) {

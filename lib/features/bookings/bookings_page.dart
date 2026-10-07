@@ -2,8 +2,11 @@ import 'package:flutter/material.dart';
 import '../../core/api_client.dart';
 import '../../core/session.dart';
 import '../../domain/models.dart';
+import '../../domain/staff_models.dart';
 import '../../shared/ui.dart';
 import '../auth/login_page.dart';
+import '../staff/staff_ui.dart';
+import 'card_payment.dart';
 
 class BookingsPage extends StatefulWidget {
   const BookingsPage({super.key});
@@ -24,10 +27,8 @@ class _BookingsPageState extends State<BookingsPage> {
   }
 
   Future<_BookingsData> _load() async {
-    final bookings = await _api.getMyBookings();
-    final rooms = await _api.getRooms();
-    final hotels = await _api.getHotels();
-    return _BookingsData(bookings: bookings, rooms: rooms, hotels: hotels);
+    final results = await Future.wait([_api.getBookings(), _api.getHotels()]);
+    return _BookingsData(bookings: results[0] as List<HotelBooking>, hotels: results[1] as List<Hotel>);
   }
 
   void _reload() {
@@ -40,16 +41,41 @@ class _BookingsPageState extends State<BookingsPage> {
     Navigator.push(context, MaterialPageRoute(builder: (_) => const LoginPage()));
   }
 
-  Future<void> _cancelBooking(Booking booking) async {
+  Future<void> _pay(HotelBooking booking) async {
+    if (await showCardPaymentSheet(context, booking)) _reload();
+  }
+
+  Future<void> _cancelBooking(HotelBooking booking) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('¿Cancelar la reserva ${booking.reference}?'),
+        content: Text(
+          booking.wasPaid
+              ? 'Tu pago quedará como reembolsado y la habitación se liberará.'
+              : 'La habitación se liberará para otros huéspedes.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Volver')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: kError),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Cancelar reserva'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
     setState(() => _updatingBookingId = booking.id);
     try {
-      await _api.cancelMyBooking(booking.id);
+      await _api.cancelBooking(booking.id);
       if (!mounted) return;
       showSmartSnack(context, 'Reserva cancelada correctamente.');
       _reload();
     } catch (e) {
       if (!mounted) return;
-      showSmartSnack(context, 'No se pudo cancelar la reserva: $e');
+      showSmartSnack(context, 'No se pudo cancelar la reserva: ${errorText(e)}');
     } finally {
       if (mounted) setState(() => _updatingBookingId = null);
     }
@@ -72,10 +98,14 @@ class _BookingsPageState extends State<BookingsPage> {
           return const LoadingView(message: 'Cargando tus reservas...');
         }
         if (snapshot.hasError) {
-          return EmptyState(message: snapshot.error.toString(), buttonText: 'Reintentar', onPressed: _reload);
+          return EmptyState(
+            message: 'No se pudieron cargar tus reservas: ${errorText(snapshot.error!)}',
+            buttonText: 'Reintentar',
+            onPressed: _reload,
+          );
         }
 
-        final data = snapshot.data ?? const _BookingsData(bookings: [], rooms: [], hotels: []);
+        final data = snapshot.data ?? const _BookingsData(bookings: [], hotels: []);
         if (data.bookings.isEmpty) {
           return EmptyState(
             message: 'Todavía no tienes reservas. Elige un hotel, entra a una habitación y reserva desde ahí.',
@@ -98,14 +128,12 @@ class _BookingsPageState extends State<BookingsPage> {
               }
 
               final booking = data.bookings[index - 1];
-              final room = data.roomFor(booking.roomId);
-              final hotel = room == null ? null : data.hotelFor(room.hotelId);
               return _BookingCard(
                 booking: booking,
-                room: room,
-                hotel: hotel,
+                hotel: data.hotelFor(booking.hotelId),
                 loading: _updatingBookingId == booking.id,
-                onCancel: booking.status.toLowerCase() == 'cancelled' ? null : () => _cancelBooking(booking),
+                onPay: () => _pay(booking),
+                onCancel: () => _cancelBooking(booking),
               );
             },
           ),
@@ -116,20 +144,12 @@ class _BookingsPageState extends State<BookingsPage> {
 }
 
 class _BookingsData {
-  final List<Booking> bookings;
-  final List<Room> rooms;
+  final List<HotelBooking> bookings;
   final List<Hotel> hotels;
 
-  const _BookingsData({required this.bookings, required this.rooms, required this.hotels});
+  const _BookingsData({required this.bookings, required this.hotels});
 
-  Room? roomFor(int roomId) {
-    for (final room in rooms) {
-      if (room.id == roomId) return room;
-    }
-    return null;
-  }
-
-  Hotel? hotelFor(int hotelId) {
+  Hotel? hotelFor(int? hotelId) {
     for (final hotel in hotels) {
       if (hotel.id == hotelId) return hotel;
     }
@@ -138,36 +158,23 @@ class _BookingsData {
 }
 
 class _BookingCard extends StatelessWidget {
-  final Booking booking;
-  final Room? room;
+  final HotelBooking booking;
   final Hotel? hotel;
   final bool loading;
-  final VoidCallback? onCancel;
+  final VoidCallback onPay;
+  final VoidCallback onCancel;
 
   const _BookingCard({
     required this.booking,
-    required this.room,
     required this.hotel,
     required this.loading,
+    required this.onPay,
     required this.onCancel,
   });
 
   @override
   Widget build(BuildContext context) {
-    final status = booking.status.toLowerCase();
-    final isConfirmed = status == 'confirmed';
-    final isCancelled = status == 'cancelled' || status == 'canceled';
-    final statusColor = isConfirmed
-        ? const Color(0xFFE8F5E9)
-        : isCancelled
-            ? const Color(0xFFFFEBEE)
-            : const Color(0xFFFFF8E1);
-    final statusLabel = isConfirmed
-        ? 'Aceptada'
-        : isCancelled
-            ? 'Cancelada'
-            : 'Pendiente';
-
+    final cancelBlock = booking.cancellationBlock;
     return SmartCard(
       margin: const EdgeInsets.only(bottom: 14),
       child: Column(
@@ -190,15 +197,14 @@ class _BookingCard extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(hotel?.name ?? 'Hotel no identificado',
+                    Text(hotel?.name ?? 'Hotel',
                         style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800)),
                     const SizedBox(height: 4),
-                    Text(room?.roomTypeName ?? 'Habitación reservada',
-                        style: const TextStyle(color: kMuted)),
+                    Text('Reserva ${booking.reference} · Hab. ${booking.roomLabel}', style: const TextStyle(color: kMuted)),
                   ],
                 ),
               ),
-              Chip(label: Text(statusLabel), backgroundColor: statusColor),
+              BookingStatusChip(booking: booking),
             ],
           ),
           const SizedBox(height: 14),
@@ -206,7 +212,9 @@ class _BookingCard extends StatelessWidget {
             children: [
               const Icon(Icons.calendar_month_outlined, size: 18, color: kMuted),
               const SizedBox(width: 6),
-              Expanded(child: Text('${booking.checkInDate.split('T').first} al ${booking.checkOutDate.split('T').first}')),
+              Expanded(
+                child: Text('${formatDay(booking.checkIn)} al ${formatDay(booking.checkOut)} · ${nightsLabel(booking.nights)}'),
+              ),
             ],
           ),
           const SizedBox(height: 8),
@@ -215,17 +223,34 @@ class _BookingCard extends StatelessWidget {
               const Icon(Icons.person_outline, size: 18, color: kMuted),
               const SizedBox(width: 6),
               Expanded(child: Text(booking.guestName)),
+              Text(formatMoney(booking.total), style: const TextStyle(fontWeight: FontWeight.w900)),
             ],
           ),
-          if (!isCancelled) ...[
+          if (booking.isPending && booking.paymentDueAt != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              'Págala antes de ${formatDateTime(booking.paymentDueAt)} o se cancelará automáticamente.',
+              style: const TextStyle(color: Color(0xFFD97706), fontWeight: FontWeight.w700, fontSize: 13),
+            ),
+          ],
+          if (booking.isPending) ...[
             const SizedBox(height: 14),
+            SmartButton(text: 'Pagar con tarjeta', icon: Icons.credit_card, dark: true, onPressed: loading ? null : onPay),
+          ],
+          if (booking.canBeChanged) ...[
+            const SizedBox(height: 10),
             OutlinedButton.icon(
-              onPressed: loading ? null : onCancel,
+              onPressed: loading || cancelBlock != null ? null : onCancel,
               icon: loading
                   ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
                   : const Icon(Icons.cancel_outlined),
               label: const Text('Cancelar reserva'),
             ),
+            if (cancelBlock != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(cancelBlock, style: const TextStyle(color: kMuted, fontSize: 12)),
+              ),
           ],
         ],
       ),
