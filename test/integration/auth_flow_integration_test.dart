@@ -6,8 +6,7 @@
 //     --dart-define=API_BASE_URL=http://127.0.0.1:10000/api/v1 \
 //     --dart-define=SMARTSTAY_API_CONTAINER=smartstay-int-api-1
 //
-// In Development the backend writes the e-mail verification link to its log, so the test reads the
-// token from `docker logs` instead of needing a real mailbox.
+// The token comes from `docker logs`: in Development the backend logs the verification link.
 import 'dart:convert';
 import 'dart:io';
 
@@ -25,7 +24,6 @@ bool get _isLocalBackend {
   return uri != null && (uri.host == 'localhost' || uri.host == '127.0.0.1');
 }
 
-/// Reads the verification token the backend logged for [email]'s verification link.
 Future<String> _verificationTokenFor(String email) async {
   final logs = await Process.run('docker', ['logs', _container]);
   final text = '${logs.stdout}\n${logs.stderr}';
@@ -45,9 +43,9 @@ Future<void> _verifyEmail(String token) async {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
-  // The test binding blocks real HTTP by default; this test must reach the local backend.
+  // The test binding blocks real HTTP by default.
   HttpOverrides.global = null;
-  // Only the platform keystore is simulated; every request below goes to the real backend.
+  // Only the platform keystore is simulated.
   FlutterSecureStorage.setMockInitialValues({});
 
   final skip = _isLocalBackend ? null : 'Set API_BASE_URL to a local backend (see the header of this file).';
