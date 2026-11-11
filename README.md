@@ -2,6 +2,13 @@
 
 Aplicación Flutter enfocada en cliente/huésped.
 
+## Enlaces
+
+- **API (producción):** https://smartstay-movildev-api.onrender.com/api/v1 · documentación en [https://smartstay-movildev-api.onrender.com/scalar](https://smartstay-movildev-api.onrender.com/scalar)
+- **Frontend web:** https://smartstay-movildev-web.vercel.app
+- **Landing page:** https://smartstay-movildev-landing.vercel.app
+- **Repositorios:** [backend](https://github.com/9097-Experimentos-SmartStay/backend) · [frontend](https://github.com/9097-Experimentos-SmartStay/frontend) · [landing-page](https://github.com/9097-Experimentos-SmartStay/landing-page) · [mobile](https://github.com/9097-Experimentos-SmartStay/mobile) · [Report](https://github.com/9097-Experimentos-SmartStay/Report)
+
 ## Flujo principal
 
 - La app permite explorar hoteles y habitaciones sin iniciar sesión.
@@ -11,10 +18,16 @@ Aplicación Flutter enfocada en cliente/huésped.
 
 ## Backend
 
-URL por defecto:
+URL del backend de producción:
 
 ```text
-https://application-mobile-backend.onrender.com/api/v1
+https://smartstay-movildev-api.onrender.com/api/v1
+```
+
+La URL se lee de `API_BASE_URL` (`lib/core/api_client.dart`). Para apuntar a producción de forma explícita:
+
+```powershell
+flutter run -d chrome --dart-define=API_BASE_URL=https://smartstay-movildev-api.onrender.com/api/v1
 ```
 
 Cuando se actualice el backend, se recomienda dejar públicos:
